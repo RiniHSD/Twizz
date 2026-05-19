@@ -1,15 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { db } from '../firebase';
-import { doc, setDoc, collection, query, where, getDocs, addDoc } from 'firebase/firestore';
-import { uploadImage } from '../supabase';
+import { supabase, uploadImage } from '../supabase';
 import { useAuth } from '../context/AuthContext';
-import { Plus, Trash2, Play, Image as ImageIcon, Save, List } from 'lucide-react';
+import { Plus, Trash2, Play, Image as ImageIcon, Save, List, Pencil } from 'lucide-react';
 
 function AdminDashboard() {
   const { currentUser } = useAuth();
   const [view, setView] = useState('list'); // 'list' or 'create'
   const [savedQuizzes, setSavedQuizzes] = useState([]);
+  const [editingQuizId, setEditingQuizId] = useState(null);
   
   const [title, setTitle] = useState('Tuizz Fun Quiz!');
   const [description, setDescription] = useState('Are you ready?');
@@ -28,14 +27,18 @@ function AdminDashboard() {
   const fetchSavedQuizzes = async () => {
     setLoading(true);
     try {
-      const q = query(collection(db, 'quiz_templates'), where('uid', '==', currentUser.uid));
-      const querySnapshot = await getDocs(q);
-      const quizzes = [];
-      querySnapshot.forEach((doc) => {
-        quizzes.push({ id: doc.id, ...doc.data() });
-      });
-      // Sort by creation time manually if needed, or rely on firestore rules. Simple sort here.
-      quizzes.sort((a, b) => b.createdAt - a.createdAt);
+      const { data, error } = await supabase
+        .from('quiz_templates')
+        .select('*')
+        .eq('uid', currentUser.id)
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+
+      const quizzes = data.map(q => ({
+        ...q,
+        createdAt: q.created_at ? new Date(q.created_at).getTime() : Date.now()
+      }));
       setSavedQuizzes(quizzes);
     } catch (err) {
       console.error("Error fetching templates:", err);
@@ -49,20 +52,63 @@ function AdminDashboard() {
     try {
       const gameCode = Math.floor(100000 + Math.random() * 900000).toString();
       const gameData = {
+        code: gameCode,
         title: template.title,
         description: template.description,
         status: 'waiting',
-        currentQuestionIndex: -1,
-        createdAt: Date.now(),
+        current_question_index: -1,
         questions: template.questions
       };
-      await setDoc(doc(db, 'games', gameCode), gameData);
+      
+      const { error } = await supabase
+        .from('games')
+        .insert(gameData);
+
+      if (error) throw error;
+
       navigate(`/host/${gameCode}`);
     } catch (error) {
       console.error("Error starting game from template:", error);
       alert('Failed to start quiz.');
     }
     setLoading(false);
+  };
+
+  const handleEditQuiz = (quiz) => {
+    setEditingQuizId(quiz.id);
+    setTitle(quiz.title);
+    setDescription(quiz.description || '');
+    setQuestions(quiz.questions);
+    setView('create');
+  };
+
+  const handleDeleteQuiz = async (quizId) => {
+    if (!window.confirm("Are you sure you want to delete this quiz template?")) return;
+    setLoading(true);
+    try {
+      const { error } = await supabase
+        .from('quiz_templates')
+        .delete()
+        .eq('id', quizId);
+
+      if (error) throw error;
+      alert('Quiz Deleted Successfully!');
+      fetchSavedQuizzes();
+    } catch (err) {
+      console.error("Error deleting template:", err);
+      alert('Failed to delete template.');
+    }
+    setLoading(false);
+  };
+
+  const handleCreateNewClick = () => {
+    setEditingQuizId(null);
+    setTitle('Tuizz Fun Quiz!');
+    setDescription('Are you ready?');
+    setQuestions([
+      { type: 'quiz', text: '', image: '', options: [{text:'', image:''}, {text:'', image:''}, {text:'', image:''}, {text:'', image:''}], correctAnswers: [0], timeLimit: 20 }
+    ]);
+    setView('create');
   };
 
   const handleAddQuestion = (type) => {
@@ -132,14 +178,30 @@ function AdminDashboard() {
 
     try {
       const templateData = {
-        uid: currentUser.uid,
+        uid: currentUser.id,
         title,
         description,
-        createdAt: Date.now(),
         questions: questions
       };
-      await addDoc(collection(db, 'quiz_templates'), templateData);
-      alert('Quiz Saved Successfully!');
+
+      if (editingQuizId) {
+        const { error } = await supabase
+          .from('quiz_templates')
+          .update(templateData)
+          .eq('id', editingQuizId);
+        
+        if (error) throw error;
+        alert('Quiz Updated Successfully!');
+      } else {
+        const { error } = await supabase
+          .from('quiz_templates')
+          .insert(templateData);
+        
+        if (error) throw error;
+        alert('Quiz Saved Successfully!');
+      }
+
+      setEditingQuizId(null);
       setView('list');
     } catch (error) {
       console.error("Error saving template:", error);
@@ -160,7 +222,7 @@ function AdminDashboard() {
           <List size={20} style={{ marginRight: '8px', verticalAlign: 'middle' }} /> My Quizzes
         </button>
         <button 
-          onClick={() => setView('create')} 
+          onClick={handleCreateNewClick} 
           className={`btn ${view === 'create' ? 'btn-primary' : ''}`}
           style={{ padding: '10px 20px', fontSize: '1.2rem', backgroundColor: view === 'create' ? '' : '#eee', color: view === 'create' ? '' : '#333' }}
         >
@@ -175,7 +237,7 @@ function AdminDashboard() {
           {!loading && savedQuizzes.length === 0 && (
             <div style={{ textAlign: 'center', padding: '40px', backgroundColor: '#f9f9f9', borderRadius: '12px' }}>
               <p style={{ fontSize: '1.2rem', color: '#666', marginBottom: '20px' }}>You haven't created any quizzes yet.</p>
-              <button onClick={() => setView('create')} className="btn btn-primary" style={{ padding: '10px 30px', fontSize: '1.2rem' }}>
+              <button onClick={handleCreateNewClick} className="btn btn-primary" style={{ padding: '10px 30px', fontSize: '1.2rem' }}>
                 Create Your First Quiz
               </button>
             </div>
@@ -187,16 +249,24 @@ function AdminDashboard() {
                   <h3 style={{ fontSize: '1.5rem', marginBottom: '5px' }}>{quiz.title}</h3>
                   <p style={{ color: '#666' }}>{quiz.questions.length} questions • Created on {new Date(quiz.createdAt).toLocaleDateString()}</p>
                 </div>
-                <button onClick={() => handleStartGameFromTemplate(quiz)} className="btn btn-primary" style={{ padding: '10px 25px', fontSize: '1.2rem' }}>
-                  <Play size={20} style={{ marginRight: '8px' }} /> Start Game
-                </button>
+                <div style={{ display: 'flex', gap: '10px' }}>
+                  <button onClick={() => handleStartGameFromTemplate(quiz)} className="btn btn-primary" style={{ padding: '10px 20px', fontSize: '1.1rem' }}>
+                    <Play size={18} style={{ marginRight: '6px', verticalAlign: 'middle' }} /> Start
+                  </button>
+                  <button onClick={() => handleEditQuiz(quiz)} className="btn btn-blue" style={{ padding: '10px 20px', fontSize: '1.1rem' }}>
+                    <Pencil size={18} style={{ marginRight: '6px', verticalAlign: 'middle' }} /> Edit
+                  </button>
+                  <button onClick={() => handleDeleteQuiz(quiz.id)} className="btn btn-red" style={{ padding: '10px 20px', fontSize: '1.1rem' }}>
+                    <Trash2 size={18} style={{ marginRight: '6px', verticalAlign: 'middle' }} /> Delete
+                  </button>
+                </div>
               </div>
             ))}
           </div>
         </div>
       ) : (
         <form onSubmit={handleSaveQuiz}>
-          <h2 className="title" style={{ fontSize: '2rem', marginBottom: '20px' }}>Create Fun Quiz! 🎉</h2>
+          <h2 className="title" style={{ fontSize: '2rem', marginBottom: '20px' }}>{editingQuizId ? 'Edit Quiz! 📝' : 'Create Fun Quiz! 🎉'}</h2>
           <div className="form-group">
             <input type="text" className="input-field" placeholder="Dashboard Title" value={title} onChange={(e) => setTitle(e.target.value)} style={{maxWidth:'100%'}}/>
           </div>
@@ -261,7 +331,7 @@ function AdminDashboard() {
           </div>
 
           <button type="submit" className="btn btn-primary" style={{ width: '100%', fontSize: '1.5rem', padding: '20px' }} disabled={loading}>
-            {loading ? 'Processing...' : <><Save size={24} style={{ marginRight: '10px' }} /> Save Quiz Template</>}
+            {loading ? 'Processing...' : <><Save size={24} style={{ marginRight: '10px' }} /> {editingQuizId ? 'Update Quiz Template' : 'Save Quiz Template'}</>}
           </button>
         </form>
       )}

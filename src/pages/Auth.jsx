@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
-import { auth } from '../firebase';
-import { signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
+import { supabase } from '../supabase';
 import { useNavigate } from 'react-router-dom';
 
 function Auth() {
@@ -17,23 +16,21 @@ function Auth() {
     setError(null);
 
     try {
+      let result;
       if (isLogin) {
-        await signInWithEmailAndPassword(auth, email, password);
+        result = await supabase.auth.signInWithPassword({ email, password });
       } else {
-        await createUserWithEmailAndPassword(auth, email, password);
+        result = await supabase.auth.signUp({ email, password });
       }
+
+      if (result.error) {
+        throw result.error;
+      }
+
       navigate('/admin'); // Redirect to Admin Dashboard
     } catch (err) {
-      let errorMessage = 'An error occurred. Please try again.';
-      if (err.code === 'auth/invalid-credential' || err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password') {
-         errorMessage = 'Invalid email or password.';
-      } else if (err.code === 'auth/email-already-in-use') {
-         errorMessage = 'Email already in use. Please login.';
-      } else if (err.code === 'auth/weak-password') {
-         errorMessage = 'Password should be at least 6 characters.';
-      } else {
-         errorMessage = err.message;
-      }
+      console.error("Auth Error:", err);
+      let errorMessage = err.message || 'An error occurred. Please try again.';
       setError(errorMessage);
     }
     setLoading(false);

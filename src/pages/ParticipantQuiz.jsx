@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { db } from '../firebase';
-import { doc, onSnapshot, updateDoc, increment } from 'firebase/firestore';
+import { supabase } from '../supabase';
 import { Triangle, Square, Circle, Diamond, Check, X } from 'lucide-react';
 import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
 
@@ -23,14 +22,80 @@ function ParticipantQuiz() {
   const playerId = localStorage.getItem(`tuizz_playerId_${gameCode}`);
 
   useEffect(() => {
-    if (!playerId) return;
-    const unsubGame = onSnapshot(doc(db, 'games', gameCode), (doc) => {
-      if (doc.exists()) setGame(doc.data());
-    });
-    const unsubPlayer = onSnapshot(doc(db, `games/${gameCode}/players`, playerId), (doc) => {
-      if (doc.exists()) setPlayer(doc.data());
-    });
-    return () => { unsubGame(); unsubPlayer(); };
+    if (!playerId || !gameCode) return;
+
+    // Fetch initial data
+    const fetchInitialData = async () => {
+      const { data: gameData, error: gameError } = await supabase
+        .from('games')
+        .select('*')
+        .eq('code', gameCode)
+        .maybeSingle();
+
+      if (!gameError && gameData) {
+        setGame({
+          ...gameData,
+          currentQuestionIndex: gameData.current_question_index,
+          questionStartTime: gameData.question_start_time
+        });
+      }
+
+      const { data: playerData, error: playerError } = await supabase
+        .from('players')
+        .select('*')
+        .eq('id', playerId)
+        .maybeSingle();
+
+      if (!playerError && playerData) {
+        setPlayer(playerData);
+      }
+    };
+
+    fetchInitialData();
+
+    // Subscribe to game updates
+    const gameChannel = supabase
+      .channel(`participant_game_${gameCode}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'games',
+          filter: `code=eq.${gameCode}`
+        },
+        (payload) => {
+          const updated = payload.new;
+          setGame({
+            ...updated,
+            currentQuestionIndex: updated.current_question_index,
+            questionStartTime: updated.question_start_time
+          });
+        }
+      )
+      .subscribe();
+
+    // Subscribe to current player updates
+    const playerChannel = supabase
+      .channel(`participant_player_${playerId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'players',
+          filter: `id=eq.${playerId}`
+        },
+        (payload) => {
+          setPlayer(payload.new);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(gameChannel);
+      supabase.removeChannel(playerChannel);
+    };
   }, [gameCode, playerId]);
 
   useEffect(() => {
@@ -117,9 +182,11 @@ function ParticipantQuiz() {
       const timeRatio = Math.max(0, (limitMs - elapsed) / limitMs);
       const points = Math.round(1000 + (500 * timeRatio));
 
-      await updateDoc(doc(db, `games/${gameCode}/players`, playerId), {
-        score: increment(points)
-      });
+      const newScore = (player?.score || 0) + points;
+      await supabase
+        .from('players')
+        .update({ score: newScore })
+        .eq('id', playerId);
     }
 
     setFeedback(isCorrect ? 'correct' : 'wrong');

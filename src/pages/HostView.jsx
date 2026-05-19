@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { db } from '../firebase';
-import { doc, onSnapshot, updateDoc, collection } from 'firebase/firestore';
+import { supabase } from '../supabase';
 import Leaderboard from '../components/Leaderboard';
 import { Users, Play, SkipForward, CheckCircle } from 'lucide-react';
 
@@ -14,19 +13,84 @@ function HostView() {
   const navigate = useNavigate();
 
   useEffect(() => {
-    const unsubGame = onSnapshot(doc(db, 'games', gameCode), (doc) => {
-      if (doc.exists()) {
-        setGame(doc.data());
-      }
-    });
+    if (!gameCode) return;
 
-    const unsubPlayers = onSnapshot(collection(db, `games/${gameCode}/players`), (snapshot) => {
-      setPlayersCount(snapshot.size);
-    });
+    // Fetch initial data
+    const fetchInitialData = async () => {
+      const { data: gameData, error: gameError } = await supabase
+        .from('games')
+        .select('*')
+        .eq('code', gameCode)
+        .maybeSingle();
+
+      if (!gameError && gameData) {
+        setGame({
+          ...gameData,
+          currentQuestionIndex: gameData.current_question_index,
+          questionStartTime: gameData.question_start_time,
+        });
+      }
+
+      const { count, error: playersError } = await supabase
+        .from('players')
+        .select('*', { count: 'exact', head: true })
+        .eq('game_code', gameCode);
+
+      if (!playersError) {
+        setPlayersCount(count || 0);
+      }
+    };
+
+    fetchInitialData();
+
+    // Subscribe to game changes
+    const gameChannel = supabase
+      .channel(`game_changes_${gameCode}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'games',
+          filter: `code=eq.${gameCode}`
+        },
+        (payload) => {
+          const updated = payload.new;
+          setGame({
+            ...updated,
+            currentQuestionIndex: updated.current_question_index,
+            questionStartTime: updated.question_start_time,
+          });
+        }
+      )
+      .subscribe();
+
+    // Subscribe to player counts
+    const playersChannel = supabase
+      .channel(`players_changes_${gameCode}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'players',
+          filter: `game_code=eq.${gameCode}`
+        },
+        async () => {
+          const { count, error } = await supabase
+            .from('players')
+            .select('*', { count: 'exact', head: true })
+            .eq('game_code', gameCode);
+          if (!error) {
+            setPlayersCount(count || 0);
+          }
+        }
+      )
+      .subscribe();
 
     return () => {
-      unsubGame();
-      unsubPlayers();
+      supabase.removeChannel(gameChannel);
+      supabase.removeChannel(playersChannel);
     };
   }, [gameCode]);
 
@@ -52,24 +116,39 @@ function HostView() {
   if (!game) return <div className="center-vertical"><p>Loading game room...</p></div>;
 
   const handleStartGame = async () => {
-    await updateDoc(doc(db, 'games', gameCode), {
-      status: 'active',
-      currentQuestionIndex: 0,
-      questionStartTime: Date.now()
-    });
+    const { error } = await supabase
+      .from('games')
+      .update({
+        status: 'active',
+        current_question_index: 0,
+        question_start_time: Date.now()
+      })
+      .eq('code', gameCode);
+
+    if (error) console.error("Error starting game:", error);
   };
 
   const handleNextQuestion = async () => {
     const nextIdx = game.currentQuestionIndex + 1;
     if (nextIdx < game.questions.length) {
-      await updateDoc(doc(db, 'games', gameCode), {
-        currentQuestionIndex: nextIdx,
-        questionStartTime: Date.now()
-      });
+      const { error } = await supabase
+        .from('games')
+        .update({
+          current_question_index: nextIdx,
+          question_start_time: Date.now()
+        })
+        .eq('code', gameCode);
+
+      if (error) console.error("Error updating next question:", error);
     } else {
-      await updateDoc(doc(db, 'games', gameCode), {
-        status: 'finished'
-      });
+      const { error } = await supabase
+        .from('games')
+        .update({
+          status: 'finished'
+        })
+        .eq('code', gameCode);
+
+      if (error) console.error("Error finishing game:", error);
     }
   };
 

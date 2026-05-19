@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { db } from '../firebase';
-import { collection, onSnapshot, query, orderBy, limit } from 'firebase/firestore';
+import { supabase } from '../supabase';
 
 function Leaderboard({ gameCode }) {
   const [players, setPlayers] = useState([]);
@@ -8,21 +7,40 @@ function Leaderboard({ gameCode }) {
   useEffect(() => {
     if (!gameCode) return;
 
-    const q = query(
-      collection(db, `games/${gameCode}/players`),
-      orderBy('score', 'desc'),
-      limit(10)
-    );
+    const fetchLeaderboard = async () => {
+      const { data, error } = await supabase
+        .from('players')
+        .select('*')
+        .eq('game_code', gameCode)
+        .order('score', { ascending: false })
+        .limit(10);
+      if (!error && data) {
+        setPlayers(data);
+      }
+    };
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const topPlayers = [];
-      snapshot.forEach(doc => {
-        topPlayers.push({ id: doc.id, ...doc.data() });
-      });
-      setPlayers(topPlayers);
-    });
+    fetchLeaderboard();
 
-    return () => unsubscribe();
+    // Subscribe to any updates to players in this game room
+    const channel = supabase
+      .channel(`leaderboard_${gameCode}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'players',
+          filter: `game_code=eq.${gameCode}`
+        },
+        () => {
+          fetchLeaderboard();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [gameCode]);
 
   return (

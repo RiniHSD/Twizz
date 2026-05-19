@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { db } from '../firebase';
-import { doc, getDoc, setDoc, collection } from 'firebase/firestore';
+import { supabase } from '../supabase';
 
 function Home() {
   const [gameCode, setGameCode] = useState('');
@@ -21,16 +20,20 @@ function Home() {
 
     try {
       const codeStr = gameCode.trim();
-      const gameRef = doc(db, 'games', codeStr);
-      const gameSnap = await getDoc(gameRef);
+      
+      // Fetch game from Supabase
+      const { data: gameData, error: gameError } = await supabase
+        .from('games')
+        .select('*')
+        .eq('code', codeStr)
+        .maybeSingle();
 
-      if (!gameSnap.exists()) {
+      if (gameError || !gameData) {
         setError('Game not found! Please check the PIN.');
         setLoading(false);
         return;
       }
 
-      const gameData = gameSnap.data();
       if (gameData.status === 'finished') {
         setError('This game has already finished.');
         setLoading(false);
@@ -40,13 +43,20 @@ function Home() {
       // Generate a simple unique ID for player using timestamp + random
       const playerId = `${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
-      // Add player to the game's players subcollection
-      const playerRef = doc(db, `games/${codeStr}/players`, playerId);
-      await setDoc(playerRef, {
-        name: playerName,
-        score: 0,
-        joinedAt: new Date()
-      });
+      // Add player to the game's players table in Supabase
+      const { error: insertError } = await supabase
+        .from('players')
+        .insert({
+          id: playerId,
+          game_code: codeStr,
+          name: playerName,
+          score: 0,
+          joined_at: new Date().toISOString()
+        });
+
+      if (insertError) {
+        throw insertError;
+      }
 
       // Save playerId to localStorage so we can identify this user in the quiz page
       localStorage.setItem(`tuizz_playerId_${codeStr}`, playerId);
@@ -54,7 +64,7 @@ function Home() {
       // Navigate to the play room
       navigate(`/play/${codeStr}`);
     } catch (err) {
-      console.error(err);
+      console.error("Join Game Error:", err);
       setError('Error joining the game. Are you connected to internet?');
     }
     setLoading(false);
